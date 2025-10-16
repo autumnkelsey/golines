@@ -1,6 +1,6 @@
-[![golines test](https://github.com/golangci/golines/actions/workflows/test.yml/badge.svg)](https://github.com/golangci/golines/actions/workflows/test.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/golangci/golines)](https://goreportcard.com/report/github.com/golangci/golines)
-[![GoDoc](https://godoc.org/github.com/golangci/golines?status.svg)](https://godoc.org/github.com/golangci/golines)
+[![golines test](https://github.com/autumnkelsey/golines/actions/workflows/test.yml/badge.svg)](https://github.com/autumnkelsey/golines/actions/workflows/test.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/autumnkelsey/golines)](https://goreportcard.com/report/github.com/autumnkelsey/golines)
+[![GoDoc](https://godoc.org/github.com/autumnkelsey/golines?status.svg)](https://godoc.org/github.com/autumnkelsey/golines)
 
 # golines
 
@@ -18,7 +18,7 @@ The original repository will probably be archived in Q4 2025.
 First, install the tool:
 
 ```bash
-go install github.com/golangci/golines@latest
+go install github.com/autumnkelsey/golines@latest
 ```
 
 Then, run:

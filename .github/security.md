@@ -6,7 +6,7 @@ We only support the latest version of golines with the two most recent minor ver
 
 ## Reporting a Vulnerability
 
-To report a potential security vulnerability, please create a [security advisory](https://github.com/golangci/golines/security/advisories/new).
+To report a potential security vulnerability, please create a [security advisory](https://github.com/autumnkelsey/golines/security/advisories/new).
 
 For us to respond to your report most effectively, please include any of the following:
 

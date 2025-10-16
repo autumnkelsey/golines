@@ -11,11 +11,11 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/autumnkelsey/golines/shorten/internal/annotation"
+	"github.com/autumnkelsey/golines/shorten/internal/graph"
+	"github.com/autumnkelsey/golines/shorten/internal/tags"
 	"github.com/dave/dst"
 	"github.com/dave/dst/decorator"
-	"github.com/golangci/golines/shorten/internal/annotation"
-	"github.com/golangci/golines/shorten/internal/graph"
-	"github.com/golangci/golines/shorten/internal/tags"
 )
 
 // The maximum number of shortening "rounds" that we'll allow.

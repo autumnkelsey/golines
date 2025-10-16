@@ -7,9 +7,9 @@ body:
     attributes:
       label: Welcome
       options:
-        - label: Yes, I've searched similar [ideas on GitHub](https://github.com/golangci/golines/discussions/categories/ideas) and didn't find any.
+        - label: Yes, I've searched similar [ideas on GitHub](https://github.com/autumnkelsey/golines/discussions/categories/ideas) and didn't find any.
           required: true
-        - label: I agree to follow this project's [Code of Conduct](https://github.com/golangci/golines?tab=coc-ov-file)
+        - label: I agree to follow this project's [Code of Conduct](https://github.com/autumnkelsey/golines?tab=coc-ov-file)
           required: true
 
   - type: dropdown

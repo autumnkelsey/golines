@@ -7,18 +7,12 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/autumnkelsey/golines/shorten/internal/annotation"
 	"github.com/dave/dst"
-	"github.com/golangci/golines/shorten/internal/annotation"
 	"github.com/ldez/structtags/parser"
 )
 
 var structTagRegexp = regexp.MustCompile("`([ ]*[a-zA-Z0-9_-]+:\".*\"[ ]*){2,}`")
-
-// HasMultipleTags returns whether the given lines have a multikey struct line.
-// It's used as an optimization step to avoid unnecessary shortening rounds.
-func HasMultipleTags(lines []string) bool {
-	return slices.ContainsFunc(lines, structTagRegexp.MatchString)
-}
 
 // FormatStructTags formats struct tags so that the keys within each block of fields are aligned.
 // It's not technically a shortening (and it usually makes these tags longer), so it's being
@@ -46,11 +40,10 @@ func FormatStructTags(fieldList *dst.FieldList) {
 	align(blockFields)
 }
 
-func isEndFieldsBlock(field *dst.Field) bool {
-	return field.Decorations().Before == dst.EmptyLine ||
-		slices.ContainsFunc(field.Decorations().Start.All(), func(s string) bool {
-			return !annotation.Is(s)
-		})
+// HasMultipleTags returns whether the given lines have a multikey struct line.
+// It's used as an optimization step to avoid unnecessary shortening rounds.
+func HasMultipleTags(lines []string) bool {
+	return slices.ContainsFunc(lines, structTagRegexp.MatchString)
 }
 
 // align formats the struct tags within a single field block.
@@ -159,8 +152,7 @@ func align(fields []*dst.Field) {
 			}
 		}
 
-		field.Tag.Value = fmt.Sprintf("`%s`",
-			strings.TrimRight(strings.Join(tagComponents, " "), " "))
+		field.Tag.Value = fmt.Sprintf("`%s`", strings.TrimRight(strings.Join(tagComponents, " "), " "))
 	}
 }
 
@@ -219,4 +211,11 @@ func getWidth(node dst.Node) (int, error) {
 	}
 
 	return 0, fmt.Errorf("could not get the width of node %+v", node)
+}
+
+func isEndFieldsBlock(field *dst.Field) bool {
+	return field.Decorations().Before == dst.EmptyLine ||
+		slices.ContainsFunc(field.Decorations().Start.All(), func(s string) bool {
+			return !annotation.Is(s)
+		})
 }

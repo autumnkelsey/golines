@@ -6,30 +6,28 @@ import (
 	"io"
 	"strings"
 
+	"github.com/autumnkelsey/golines/shorten/internal/annotation"
 	"github.com/dave/dst"
-	"github.com/golangci/golines/shorten/internal/annotation"
 )
+
+// Edge is a representation of an edge in the AST graph.
+type Edge struct {
+	Dest         *Node
+	Relationship string
+}
 
 // Node is a representation of a node in the AST graph.
 type Node struct {
 	Type  string
 	Value string
 	Node  dst.Node
-	Edges []*Edge
-
-	// Used for keeping track of node position during rendering
+	Edges []*Edge // Used for keeping track of node position during rendering
 	level int
 	seq   int
 }
 
 func (n *Node) id() string {
 	return fmt.Sprintf("%s_%d_%d", n.Type, n.level, n.seq)
-}
-
-// Edge is a representation of an edge in the AST graph.
-type Edge struct {
-	Dest         *Node
-	Relationship string
 }
 
 // CreateDot creates a dot representation of the graph associated with a dst node.
@@ -103,25 +101,12 @@ func Walk(root *Node) (string, error) {
 			nodeLabel = node.Type
 		}
 
-		outLines = append(
-			outLines,
-			fmt.Sprintf(
-				"\t"+`%s[label=<%s>,shape="box"%s]`,
-				node.id(),
-				nodeLabel,
-				nodeFormat,
-			),
-		)
+		outLines = append(outLines, fmt.Sprintf("\t"+`%s[label=<%s>,shape="box"%s]`, node.id(), nodeLabel, nodeFormat))
 
 		for _, edge := range node.Edges {
 			outLines = append(
 				outLines,
-				fmt.Sprintf(
-					"\t"+`%s->%s[label="%s",fontsize=12.0]`,
-					node.id(),
-					edge.Dest.id(),
-					edge.Relationship,
-				),
+				fmt.Sprintf("\t"+`%s->%s[label="%s",fontsize=12.0]`, node.id(), edge.Dest.id(), edge.Relationship),
 			)
 		}
 	}
