@@ -18,14 +18,14 @@ import (
 	"github.com/golangci/golines/shorten/internal/tags"
 )
 
-// Go directive (should be ignored).
-// https://go.dev/doc/comment#syntax
-var directivePattern = regexp.MustCompile(`\s*//(line |extern |export |[a-z0-9]+:[a-z0-9])`)
-
 // The maximum number of shortening "rounds" that we'll allow.
 // The shortening process should converge quickly,
 // but we have this here as a safety mechanism to prevent loops that prevent termination.
 const maxRounds = 20
+
+// Go directive (should be ignored).
+// https://go.dev/doc/comment#syntax
+var directivePattern = regexp.MustCompile(`\s*//(line |extern |export |[a-z0-9]+:[a-z0-9])`)
 
 // Config stores the configuration options exposed by a Shortener instance.
 type Config struct {
@@ -38,54 +38,13 @@ type Config struct {
 	ChainSplitDots  bool   // Whether to split chain methods by putting dots at the ends of lines
 }
 
-// NewDefaultConfig returns a [Config] with default values.
-func NewDefaultConfig() *Config {
-	return &Config{
-		MaxLen:          100,
-		TabLen:          4,
-		KeepAnnotations: false,
-		ShortenComments: false,
-		ReformatTags:    true,
-		DotFile:         "",
-		ChainSplitDots:  true,
-	}
-}
-
 // Options is the type for configuring options of a [Shortener] instance.
 type Options func(*Shortener)
-
-// WithLogger sets the logger to use it for a [Shortener] instance.
-func WithLogger(logger Logger) Options {
-	return func(s *Shortener) {
-		if logger != nil {
-			s.logger = logger
-		}
-	}
-}
 
 // Shortener shortens a single go file according to a small set of user style preferences.
 type Shortener struct {
 	config *Config
-
 	logger Logger
-}
-
-// NewShortener creates a new shortener instance from the provided config.
-func NewShortener(config *Config, opts ...Options) *Shortener {
-	if config == nil {
-		config = NewDefaultConfig()
-	}
-
-	s := &Shortener{
-		config: config,
-		logger: &noopLogger{},
-	}
-
-	for _, opt := range opts {
-		opt(s)
-	}
-
-	return s
 }
 
 // Process shortens the provided golang file content bytes.
@@ -203,10 +162,7 @@ func (s *Shortener) annotateLongLines(lines []string) ([]string, int) {
 				linesToShorten++
 			}
 		} else if !isComment(line) && length > s.config.MaxLen {
-			annotatedLines = append(
-				annotatedLines,
-				annotation.Create(length),
-			)
+			annotatedLines = append(annotatedLines, annotation.Create(length))
 			linesToShorten++
 		}
 
@@ -217,99 +173,141 @@ func (s *Shortener) annotateLongLines(lines []string) ([]string, int) {
 	return annotatedLines, linesToShorten
 }
 
-// removeAnnotations removes all comments added by the annotateLongLines
-// function above.
-func (s *Shortener) removeAnnotations(content []byte) []byte {
-	var cleanedLines []string
-
-	lines := strings.SplitSeq(string(content), "\n")
-
-	for line := range lines {
-		if !annotation.Is(line) {
-			cleanedLines = append(cleanedLines, line)
-		}
+func (s *Shortener) createDot(result dst.Node) error {
+	dotFile, err := os.Create(s.config.DotFile)
+	if err != nil {
+		return err
 	}
 
-	return []byte(strings.Join(cleanedLines, "\n"))
+	defer dotFile.Close()
+
+	s.logger.Debug("writing dot file output", slog.String("file", s.config.DotFile))
+
+	return graph.CreateDot(result, dotFile)
 }
 
-// shortenCommentsFunc attempts to shorten long comments in the provided source. As noted
-// in the repo README, this functionality has some quirks and is disabled by default.
-func (s *Shortener) shortenCommentsFunc(content []byte) []byte {
-	var cleanedLines []string
+// formatDecl formats an AST declaration node. These include function declarations,
+// imports, and constants.
+func (s *Shortener) formatDecl(decl dst.Decl) {
+	switch d := decl.(type) {
+	case *dst.FuncDecl:
+		if d.Type != nil && d.Type.Params != nil && annotation.HasRecursive(d) {
+			s.formatFieldList(d.Type.Params)
+		}
 
-	var words []string // all words in a contiguous sequence of long comments
+		s.formatStmt(d.Body, false)
 
-	prefix := ""
+	case *dst.GenDecl:
+		shouldShorten := annotation.Has(d)
 
-	lines := strings.SplitSeq(string(content), "\n")
-	for line := range lines {
-		if isComment(line) && !annotation.Is(line) &&
-			!isDirective(line) &&
-			s.lineLen(line) > s.config.MaxLen {
-			start := strings.Index(line, "//")
-			prefix = line[0:(start + 2)]
-			trimmedLine := strings.Trim(line[(start+2):], " ")
-			currLineWords := strings.Split(trimmedLine, " ")
-			words = append(words, currLineWords...)
+		for _, spec := range d.Specs {
+			s.formatSpec(spec, shouldShorten)
+		}
+
+	default:
+		s.logger.Debug("got a declaration type that can't be shortened", slog.Any("decl_type", reflect.TypeOf(d)))
+	}
+}
+
+// formatExpr formats an AST expression node. These include uniary and binary expressions, function
+// literals, and key/value pair statements, among others.
+func (s *Shortener) formatExpr(expr dst.Expr, force, isChain bool) {
+	shouldShorten := force || annotation.Has(expr)
+
+	switch e := expr.(type) {
+	case *dst.BinaryExpr:
+		if (e.Op == token.LAND || e.Op == token.LOR) && shouldShorten {
+			if e.Y.Decorations().Before == dst.NewLine {
+				s.formatExpr(e.X, force, isChain)
+			} else {
+				e.Y.Decorations().Before = dst.NewLine
+			}
 		} else {
-			// Reflow the accumulated `words` before appending the unprocessed `line`.
-			currLineLen := 0
+			s.formatExpr(e.X, shouldShorten, isChain)
+			s.formatExpr(e.Y, shouldShorten, isChain)
+		}
 
-			var currLineWords []string
+	case *dst.CallExpr:
+		shortenChildArgs := shouldShorten || annotation.HasRecursive(e)
 
-			maxCommentLen := s.config.MaxLen - s.lineLen(prefix)
-			for _, word := range words {
-				if currLineLen > 0 && currLineLen+1+len(word) > maxCommentLen {
-					cleanedLines = append(
-						cleanedLines,
-						fmt.Sprintf(
-							"%s %s",
-							prefix,
-							strings.Join(currLineWords, " "),
-						),
-					)
-					currLineWords = []string{}
-					currLineLen = 0
+		_, ok := e.Fun.(*dst.SelectorExpr)
+
+		if ok && shortenChildArgs && s.config.ChainSplitDots && (isChain || chainLength(e) > 1) {
+			e.Decorations().After = dst.NewLine
+
+			for _, arg := range e.Args {
+				s.formatExpr(arg, false, true)
+			}
+
+			s.formatExpr(e.Fun, shouldShorten, true)
+		} else {
+			for i, arg := range e.Args {
+				if shortenChildArgs {
+					formatList(arg, i)
 				}
 
-				currLineWords = append(currLineWords, word)
-				currLineLen += 1 + len(word)
+				s.formatExpr(arg, false, isChain)
 			}
 
-			if currLineLen > 0 {
-				cleanedLines = append(
-					cleanedLines,
-					fmt.Sprintf(
-						"%s %s",
-						prefix,
-						strings.Join(currLineWords, " "),
-					),
-				)
+			s.formatExpr(e.Fun, shouldShorten, isChain)
+		}
+
+	case *dst.CompositeLit:
+		if shouldShorten {
+			for i, element := range e.Elts {
+				if i == 0 {
+					element.Decorations().Before = dst.NewLine
+				}
+
+				element.Decorations().After = dst.NewLine
 			}
+		}
 
-			words = []string{}
+		for _, element := range e.Elts {
+			s.formatExpr(element, false, isChain)
+		}
 
-			cleanedLines = append(cleanedLines, line)
+	case *dst.FuncLit:
+		s.formatStmt(e.Body, false)
+
+	case *dst.FuncType:
+		if shouldShorten {
+			s.formatFieldList(e.Params)
+		}
+
+	case *dst.InterfaceType:
+		for _, method := range e.Methods.List {
+			if annotation.Has(method) {
+				s.formatExpr(method.Type, true, isChain)
+			}
+		}
+
+	case *dst.KeyValueExpr:
+		s.formatExpr(e.Value, shouldShorten, isChain)
+
+	case *dst.SelectorExpr:
+		s.formatExpr(e.X, shouldShorten, isChain)
+
+	case *dst.StructType:
+		if s.config.ReformatTags {
+			tags.FormatStructTags(e.Fields)
+		}
+
+	case *dst.UnaryExpr:
+		s.formatExpr(e.X, shouldShorten, isChain)
+
+	default:
+		if shouldShorten {
+			s.logger.Debug("got an expression type that can't be shortened", slog.Any("expr_type", reflect.TypeOf(e)))
 		}
 	}
-
-	return []byte(strings.Join(cleanedLines, "\n"))
 }
 
-// lineLen gets the width of the provided line after tab expansion.
-func (s *Shortener) lineLen(line string) int {
-	length := 0
-
-	for _, char := range line {
-		if char == '\t' {
-			length += s.config.TabLen
-		} else {
-			length++
-		}
+// formatFieldList formats a field list in a function declaration.
+func (s *Shortener) formatFieldList(fieldList *dst.FieldList) {
+	for i, field := range fieldList.List {
+		formatList(field, i)
 	}
-
-	return length
 }
 
 // formatNode formats the provided AST node. The appropriate helper function is called
@@ -333,43 +331,27 @@ func (s *Shortener) formatNode(node dst.Node) {
 		s.formatSpec(n, false)
 
 	default:
-		s.logger.Debug(
-			"got a node type that can't be shortened",
-			slog.Any("node_type", reflect.TypeOf(n)),
-		)
+		s.logger.Debug("got a node type that can't be shortened", slog.Any("node_type", reflect.TypeOf(n)))
 	}
 }
 
-// formatDecl formats an AST declaration node. These include function declarations,
-// imports, and constants.
-func (s *Shortener) formatDecl(decl dst.Decl) {
-	switch d := decl.(type) {
-	case *dst.FuncDecl:
-		if d.Type != nil && d.Type.Params != nil && annotation.HasRecursive(d) {
-			s.formatFieldList(d.Type.Params)
+// formatSpec formats an AST spec node. These include type specifications, among other things.
+func (s *Shortener) formatSpec(spec dst.Spec, force bool) {
+	shouldShorten := annotation.Has(spec) || force
+
+	switch sp := spec.(type) {
+	case *dst.ValueSpec:
+		for _, expr := range sp.Values {
+			s.formatExpr(expr, shouldShorten, false)
 		}
 
-		s.formatStmt(d.Body, false)
-
-	case *dst.GenDecl:
-		shouldShorten := annotation.Has(d)
-
-		for _, spec := range d.Specs {
-			s.formatSpec(spec, shouldShorten)
-		}
+	case *dst.TypeSpec:
+		s.formatExpr(sp.Type, false, false)
 
 	default:
-		s.logger.Debug(
-			"got a declaration type that can't be shortened",
-			slog.Any("decl_type", reflect.TypeOf(d)),
-		)
-	}
-}
-
-// formatFieldList formats a field list in a function declaration.
-func (s *Shortener) formatFieldList(fieldList *dst.FieldList) {
-	for i, field := range fieldList.List {
-		formatList(field, i)
+		if shouldShorten {
+			s.logger.Debug("got a spec type that can't be shortened", slog.Any("spec_type", reflect.TypeOf(sp)))
+		}
 	}
 }
 
@@ -451,160 +433,130 @@ func (s *Shortener) formatStmt(stmt dst.Stmt, force bool) {
 	case *dst.SwitchStmt:
 		s.formatStmt(st.Body, false)
 
+	case *dst.TypeSwitchStmt:
+		s.formatStmt(st.Body, false)
+
 	default:
 		if shouldShorten {
-			s.logger.Debug(
-				"got a statement type that can't be shortened",
-				slog.Any("stmt_type", stmtType),
-			)
+			s.logger.Debug("got a statement type that can't be shortened", slog.Any("stmt_type", stmtType))
 		}
 	}
 }
 
-// formatExpr formats an AST expression node. These include uniary and binary expressions, function
-// literals, and key/value pair statements, among others.
-func (s *Shortener) formatExpr(expr dst.Expr, force, isChain bool) {
-	shouldShorten := force || annotation.Has(expr)
+// lineLen gets the width of the provided line after tab expansion.
+func (s *Shortener) lineLen(line string) int {
+	length := 0
 
-	switch e := expr.(type) {
-	case *dst.BinaryExpr:
-		if (e.Op == token.LAND || e.Op == token.LOR) && shouldShorten {
-			if e.Y.Decorations().Before == dst.NewLine {
-				s.formatExpr(e.X, force, isChain)
-			} else {
-				e.Y.Decorations().Before = dst.NewLine
-			}
+	for _, char := range line {
+		if char == '\t' {
+			length += s.config.TabLen
 		} else {
-			s.formatExpr(e.X, shouldShorten, isChain)
-			s.formatExpr(e.Y, shouldShorten, isChain)
+			length++
 		}
+	}
 
-	case *dst.CallExpr:
-		shortenChildArgs := shouldShorten || annotation.HasRecursive(e)
+	return length
+}
 
-		_, ok := e.Fun.(*dst.SelectorExpr)
+// removeAnnotations removes all comments added by the annotateLongLines
+// function above.
+func (s *Shortener) removeAnnotations(content []byte) []byte {
+	var cleanedLines []string
 
-		if ok && shortenChildArgs &&
-			s.config.ChainSplitDots && (isChain || chainLength(e) > 1) {
-			e.Decorations().After = dst.NewLine
+	lines := strings.SplitSeq(string(content), "\n")
 
-			for _, arg := range e.Args {
-				s.formatExpr(arg, false, true)
-			}
+	for line := range lines {
+		if !annotation.Is(line) {
+			cleanedLines = append(cleanedLines, line)
+		}
+	}
 
-			s.formatExpr(e.Fun, shouldShorten, true)
+	return []byte(strings.Join(cleanedLines, "\n"))
+}
+
+// shortenCommentsFunc attempts to shorten long comments in the provided source. As noted
+// in the repo README, this functionality has some quirks and is disabled by default.
+func (s *Shortener) shortenCommentsFunc(content []byte) []byte {
+	var cleanedLines []string
+
+	var words []string // all words in a contiguous sequence of long comments
+
+	prefix := ""
+
+	lines := strings.SplitSeq(string(content), "\n")
+	for line := range lines {
+		if isComment(line) && !annotation.Is(line) && !isDirective(line) && s.lineLen(line) > s.config.MaxLen {
+			start := strings.Index(line, "//")
+			prefix = line[0:(start + 2)]
+			trimmedLine := strings.Trim(line[(start+2):], " ")
+			currLineWords := strings.Split(trimmedLine, " ")
+			words = append(words, currLineWords...)
 		} else {
-			for i, arg := range e.Args {
-				if shortenChildArgs {
-					formatList(arg, i)
+			// Reflow the accumulated `words` before appending the unprocessed `line`.
+			currLineLen := 0
+
+			var currLineWords []string
+
+			maxCommentLen := s.config.MaxLen - s.lineLen(prefix)
+			for _, word := range words {
+				if currLineLen > 0 && currLineLen+1+len(word) > maxCommentLen {
+					cleanedLines = append(cleanedLines, fmt.Sprintf("%s %s", prefix, strings.Join(currLineWords, " ")))
+					currLineWords = []string{}
+					currLineLen = 0
 				}
 
-				s.formatExpr(arg, false, isChain)
+				currLineWords = append(currLineWords, word)
+				currLineLen += 1 + len(word)
 			}
 
-			s.formatExpr(e.Fun, shouldShorten, isChain)
-		}
-
-	case *dst.CompositeLit:
-		if shouldShorten {
-			for i, element := range e.Elts {
-				if i == 0 {
-					element.Decorations().Before = dst.NewLine
-				}
-
-				element.Decorations().After = dst.NewLine
+			if currLineLen > 0 {
+				cleanedLines = append(cleanedLines, fmt.Sprintf("%s %s", prefix, strings.Join(currLineWords, " ")))
 			}
+
+			words = []string{}
+
+			cleanedLines = append(cleanedLines, line)
 		}
+	}
 
-		for _, element := range e.Elts {
-			s.formatExpr(element, false, isChain)
-		}
+	return []byte(strings.Join(cleanedLines, "\n"))
+}
 
-	case *dst.FuncLit:
-		s.formatStmt(e.Body, false)
-
-	case *dst.FuncType:
-		if shouldShorten {
-			s.formatFieldList(e.Params)
-		}
-
-	case *dst.InterfaceType:
-		for _, method := range e.Methods.List {
-			if annotation.Has(method) {
-				s.formatExpr(method.Type, true, isChain)
-			}
-		}
-
-	case *dst.KeyValueExpr:
-		s.formatExpr(e.Value, shouldShorten, isChain)
-
-	case *dst.SelectorExpr:
-		s.formatExpr(e.X, shouldShorten, isChain)
-
-	case *dst.StructType:
-		if s.config.ReformatTags {
-			tags.FormatStructTags(e.Fields)
-		}
-
-	case *dst.UnaryExpr:
-		s.formatExpr(e.X, shouldShorten, isChain)
-
-	default:
-		if shouldShorten {
-			s.logger.Debug(
-				"got an expression type that can't be shortened",
-				slog.Any("expr_type", reflect.TypeOf(e)),
-			)
-		}
+// NewDefaultConfig returns a [Config] with default values.
+func NewDefaultConfig() *Config {
+	return &Config{
+		MaxLen:          100,
+		TabLen:          4,
+		KeepAnnotations: false,
+		ShortenComments: false,
+		ReformatTags:    true,
+		DotFile:         "",
+		ChainSplitDots:  true,
 	}
 }
 
-// formatSpec formats an AST spec node. These include type specifications, among other things.
-func (s *Shortener) formatSpec(spec dst.Spec, force bool) {
-	shouldShorten := annotation.Has(spec) || force
-
-	switch sp := spec.(type) {
-	case *dst.ValueSpec:
-		for _, expr := range sp.Values {
-			s.formatExpr(expr, shouldShorten, false)
-		}
-
-	case *dst.TypeSpec:
-		s.formatExpr(sp.Type, false, false)
-
-	default:
-		if shouldShorten {
-			s.logger.Debug(
-				"got a spec type that can't be shortened",
-				slog.Any("spec_type", reflect.TypeOf(sp)),
-			)
-		}
+// NewShortener creates a new shortener instance from the provided config.
+func NewShortener(config *Config, opts ...Options) *Shortener {
+	if config == nil {
+		config = NewDefaultConfig()
 	}
+
+	s := &Shortener{config: config, logger: &noopLogger{}}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	return s
 }
 
-func (s *Shortener) createDot(result dst.Node) error {
-	dotFile, err := os.Create(s.config.DotFile)
-	if err != nil {
-		return err
+// WithLogger sets the logger to use it for a [Shortener] instance.
+func WithLogger(logger Logger) Options {
+	return func(s *Shortener) {
+		if logger != nil {
+			s.logger = logger
+		}
 	}
-
-	defer dotFile.Close()
-
-	s.logger.Debug("writing dot file output", slog.String("file", s.config.DotFile))
-
-	return graph.CreateDot(result, dotFile)
-}
-
-func formatList(node dst.Node, index int) {
-	decorations := node.Decorations()
-
-	if index == 0 {
-		decorations.Before = dst.NewLine
-	} else {
-		decorations.Before = dst.None
-	}
-
-	decorations.After = dst.NewLine
 }
 
 // chainLength determines the length of the function call chain in an expression.
@@ -627,6 +579,18 @@ func chainLength(callExpr *dst.CallExpr) int {
 	}
 
 	return numCalls
+}
+
+func formatList(node dst.Node, index int) {
+	decorations := node.Decorations()
+
+	if index == 0 {
+		decorations.Before = dst.NewLine
+	} else {
+		decorations.Before = dst.None
+	}
+
+	decorations.After = dst.NewLine
 }
 
 // isComment determines whether the provided line is a non-block comment.
